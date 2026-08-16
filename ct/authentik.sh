@@ -38,13 +38,14 @@ function update_script() {
 
   NODE_VERSION="24" setup_nodejs
   setup_go
-  UV_PYTHON_INSTALL_DIR="/usr/local/bin" PYTHON_VERSION="3.14.3" setup_uv
+  $STD uv cache clean
+  UV_PYTHON_INSTALL_DIR="/usr/local/bin" PYTHON_VERSION="3.14.6" setup_uv
   RUST_PROFILE="minimal" RUST_TOOLCHAIN="stable" setup_rust
   setup_yq
 
-  AUTHENTIK_VERSION="version/2026.5.3"
+  AUTHENTIK_VERSION="version/2026.5.6"
   # Source: https://github.com/goauthentik/fips/blob/main/Makefile#L26
-  XMLSEC_VERSION="1.3.11"
+  XMLSEC_VERSION="1.3.12"
 
   if check_for_gh_release "geoipupdate" "maxmind/geoipupdate"; then
     fetch_and_deploy_gh_release "geoipupdate" "maxmind/geoipupdate" "binary"
@@ -104,7 +105,7 @@ function update_script() {
     $STD go build -o /opt/authentik/radius ./cmd/radius
     msg_ok "Updated go proxy"
 
-    msg_info "Building worker"
+    msg_info "Building worker. It may take more than 10 minutes, please be patient."
     export AWS_LC_FIPS_SYS_CC="clang"
     cd /opt/authentik
     $STD cargo build --package authentik --no-default-features --features core --locked --release --jobs 1
@@ -117,10 +118,19 @@ function update_script() {
     export UV_COMPILE_BYTECODE="1"
     export UV_LINK_MODE="copy"
     export UV_NATIVE_TLS="1"
+    export UV_HTTP_TIMEOUT="300"
     export RUSTUP_PERMIT_COPY_RENAME="true"
     export UV_PYTHON_INSTALL_DIR="/usr/local/bin"
     cd /opt/authentik
-    $STD uv sync --frozen --no-install-project --no-dev
+    for attempt in 1 2 3; do
+      if [[ $attempt -eq 3 ]]; then
+        $STD uv sync --frozen --no-install-project --no-dev
+        break
+      fi
+      $STD uv sync --frozen --no-install-project --no-dev && break
+      msg_warn "uv sync attempt $attempt failed, retrying..."
+      sleep $((attempt * 15))
+    done
     chown -R authentik:authentik /opt/authentik
     msg_ok "Updated python server"
 

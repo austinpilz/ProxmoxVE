@@ -37,25 +37,17 @@ function update_script() {
     systemctl stop homepage
     msg_ok "Stopped service"
 
-    msg_info "Creating Backup"
-    cp /opt/homepage/.env /opt/homepage.env
-    cp -r /opt/homepage/config /opt/homepage_config_backup
-    [[ -d /opt/homepage/public/images ]] && cp -r /opt/homepage/public/images /opt/homepage_images_backup
-    [[ -d /opt/homepage/public/icons ]] && cp -r /opt/homepage/public/icons /opt/homepage_icons_backup
-    msg_ok "Created Backup"
-    
+    create_backup /opt/homepage/.env /opt/homepage/config
+    BACKUP_DIR=/opt/homepage-assets.backup create_backup /opt/homepage/public/images /opt/homepage/public/icons
+
     CLEAN_INSTALL=1 fetch_and_deploy_gh_release "homepage" "gethomepage/homepage" "tarball"
-    
-    msg_info "Restoring Backup"
-    mv /opt/homepage.env /opt/homepage
-    rm -rf /opt/homepage/config
-    mv /opt/homepage_config_backup /opt/homepage/config
-    msg_ok "Restored Backup"
+
+    restore_backup
 
     msg_info "Updating Homepage (Patience)"
     RELEASE=$(get_latest_github_release "gethomepage/homepage")
     cd /opt/homepage
-    echo 'onlyBuiltDependencies=*' >> .npmrc
+    echo 'onlyBuiltDependencies=*' >>.npmrc
     $STD pnpm install
     $STD pnpm update --no-save caniuse-lite
     export NEXT_PUBLIC_VERSION="v$RELEASE"
@@ -63,8 +55,28 @@ function update_script() {
     export NEXT_PUBLIC_BUILDTIME=$(curl -fsSL https://api.github.com/repos/gethomepage/homepage/releases/latest | jq -r '.published_at')
     export NEXT_TELEMETRY_DISABLED=1
     $STD pnpm build
-    [[ -d /opt/homepage_images_backup ]] && mv /opt/homepage_images_backup /opt/homepage/public/images
-    [[ -d /opt/homepage_icons_backup ]] && mv /opt/homepage_icons_backup /opt/homepage/public/icons
+    BACKUP_DIR=/opt/homepage-assets.backup restore_backup
+    if ! grep -q 'AUTH' /opt/homepage/.env; then
+      msg_info "Updating .env"
+      cp /opt/homepage/.env /opt/homepage/env.bak
+      cat <<EOF >>/opt/homepage/.env
+## Optional Authentication
+# HOMEPAGE_AUTH_ENABLED=true
+# HOMEPAGE_AUTH_SECRET="$(openssl rand -base64 32)"
+# HOMEPAGE_EXTERNAL_URL=<your-external-url>
+## Uncomment below and use strong, unique password for password login
+# HOMEPAGE_AUTH_PASSWORD=
+## Uncomment and fill in below for OIDC login
+# HOMEPAGE_OIDC_ISSUER=
+# HOMEPAGE_OIDC_CLIENT_ID=
+# HOMEPAGE_OIDC_CLIENT_SECRET=
+# HOMEPAGE_OIDC_SCOPE=openid email profile
+# HOMEPAGE_OIDC_NAME=
+EOF
+      msg_ok "Updated .env"
+      rm /opt/homepage/env.bak
+      chmod 600 /opt/homepage/.env
+    fi
     msg_ok "Updated Homepage"
 
     msg_info "Starting service"

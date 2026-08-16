@@ -162,7 +162,7 @@ PG_VERSION="16" PG_MODULES="pgvector" setup_postgresql
 ACTUAL_PG_VERSION=$(ls /etc/postgresql/ 2>/dev/null | sort -V | tail -1)
 ACTUAL_PG_VERSION=${ACTUAL_PG_VERSION:-16}
 
-VCHORD_RELEASE="1.0.0"
+VCHORD_RELEASE="1.1.1"
 fetch_and_deploy_gh_release "VectorChord" "tensorchord/VectorChord" "binary" "${VCHORD_RELEASE}" "/tmp" "postgresql-${ACTUAL_PG_VERSION}-vchord_*_$(arch_resolve).deb"
 
 sed -i "s/^#shared_preload.*/shared_preload_libraries = 'vchord.so'/" /etc/postgresql/${ACTUAL_PG_VERSION}/main/postgresql.conf
@@ -286,6 +286,7 @@ LIBVIPS_REVISION="e01a4797cabe77d457fdfa7d776b7a7e7ca6d6a7"
 $STD git clone https://github.com/libvips/libvips.git "$SOURCE"
 cd "$SOURCE"
 $STD git reset --hard "$LIBVIPS_REVISION"
+$STD git apply "$BASE_DIR"/server/sources/libvips-patches/0001-put-other-loaders-ahead-of-dcrawload.patch
 $STD meson setup build --buildtype=release --libdir=lib -Dintrospection=disabled -Dtiff=disabled
 cd build
 $STD ninja install
@@ -311,7 +312,7 @@ ML_DIR="${APP_DIR}/machine-learning"
 GEO_DIR="${INSTALL_DIR}/geodata"
 mkdir -p {"${APP_DIR}","${UPLOAD_DIR}","${GEO_DIR}","${INSTALL_DIR}"/cache}
 
-fetch_and_deploy_gh_release "Immich" "immich-app/immich" "tarball" "v3.0.1" "$SRC_DIR"
+fetch_and_deploy_gh_release "Immich" "immich-app/immich" "tarball" "v3.1.0" "$SRC_DIR"
 PNPM_VERSION="$(jq -r '.packageManager | split("@")[1] | split("+")[0]' ${SRC_DIR}/package.json)"
 export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 NODE_VERSION="24" NODE_MODULE="corepack" setup_nodejs
@@ -354,7 +355,16 @@ cp LICENSE "$APP_DIR"
 cd "$SRC_DIR"
 export MISE_TRUSTED_CONFIG_PATHS="$SRC_DIR"/mise.toml
 export MISE_DISABLE_TOOLS=github:jellyfin/jellyfin-ffmpeg
-$STD mise install
+mise_ok=0
+for i in 1 2 3; do
+  $STD mise install && {
+    mise_ok=1
+    break
+  }
+  msg_warn "mise install failed (attempt $i/3) - retrying"
+  sleep 5
+done
+[[ "$mise_ok" -eq 1 ]] || exit 1
 export PATH="$(mise bin-paths 2>/dev/null | tr '\n' ':')$PATH"
 if ! command -v extism-js >/dev/null 2>&1; then
   # extism-js is published as a bare gzip-compressed single binary (.gz), which
@@ -428,6 +438,7 @@ msg_info "Installing GeoNames data"
 cd "$GEO_DIR"
 curl_with_retry "https://download.geonames.org/export/dump/admin1CodesASCII.txt" "admin1CodesASCII.txt"
 curl_with_retry "https://download.geonames.org/export/dump/admin2Codes.txt" "admin2Codes.txt"
+curl_with_retry "https://download.geonames.org/export/dump/countryInfo.txt" "countryInfo.txt"
 curl_with_retry "https://download.geonames.org/export/dump/cities500.zip" "cities500.zip"
 curl_with_retry "https://raw.githubusercontent.com/nvkelso/natural-earth-vector/v5.1.2/geojson/ne_10m_admin_0_countries.geojson" "ne_10m_admin_0_countries.geojson"
 unzip -q cities500.zip
@@ -436,6 +447,27 @@ rm cities500.zip
 cd "$INSTALL_DIR"
 ln -s "$GEO_DIR" "$APP_DIR"
 msg_ok "Installed GeoNames data"
+
+# MickLesk temporary patch for HEIC thumbnail gen
+msg_info "Patching media.repository.js"
+MEDIA_REPO_JS="/opt/immich/app/dist/repositories/media.repository.js"
+if [[ -f "$MEDIA_REPO_JS" ]]; then
+  python3 - <<'PY'
+from pathlib import Path
+p = Path('/opt/immich/app/dist/repositories/media.repository.js')
+s = p.read_text()
+old = "(0, sharp_1.default)(input).metadata()"
+new = "(0, sharp_1.default)(input, { unlimited: true, limitInputPixels: false }).metadata()"
+if new in s:
+    print('hotfix already there')
+elif old in s:
+    p.write_text(s.replace(old, new, 1))
+    print('hotfix applied')
+else:
+    print('pattern not found, skipped')
+PY
+fi
+msg_ok "Patched media.repository.js"
 
 mkdir -p /var/log/immich
 touch /var/log/immich/{web.log,ml.log}

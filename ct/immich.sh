@@ -110,7 +110,7 @@ EOF
     msg_ok "Image-processing libraries up to date"
   fi
 
-  RELEASE="v3.0.1"
+  RELEASE="v3.1.0"
   if check_for_gh_release "Immich" "immich-app/immich" "${RELEASE}" "each release is tested individually before the version is updated. Please do not open issues for this"; then
     if [[ $(cat ~/.immich) > "2.5.1" ]]; then
       msg_info "Enabling Maintenance Mode"
@@ -124,7 +124,9 @@ EOF
     systemctl stop immich-web
     systemctl stop immich-ml
     msg_ok "Stopped Services"
-    VCHORD_RELEASE="1.0.0"
+    VCHORD_RELEASE="1.1.1"
+    PG_VERSION=$(ls /etc/postgresql/ 2>/dev/null | sort -V | tail -1)
+    PG_VERSION=${PG_VERSION:-16}
     [[ -f ~/.vchord_version ]] && mv ~/.vchord_version ~/.vectorchord
     if check_for_gh_release "VectorChord" "tensorchord/VectorChord" "${VCHORD_RELEASE}" "updated together with Immich after testing"; then
       # dead tuples in smart_search/face_search make the REINDEX below fail with
@@ -132,7 +134,7 @@ EOF
       # while still on the old extension version, a post-upgrade vacuum errors instead
       $STD sudo -u postgres psql -d immich -c "VACUUM (ANALYZE) smart_search;"
       $STD sudo -u postgres psql -d immich -c "VACUUM (ANALYZE) face_search;"
-      fetch_and_deploy_gh_release "VectorChord" "tensorchord/VectorChord" "binary" "${VCHORD_RELEASE}" "/tmp" "postgresql-16-vchord_*_$(arch_resolve).deb"
+      fetch_and_deploy_gh_release "VectorChord" "tensorchord/VectorChord" "binary" "${VCHORD_RELEASE}" "/tmp" "postgresql-${PG_VERSION}-vchord_*_$(arch_resolve).deb"
       systemctl restart postgresql
       $STD sudo -u postgres psql -d immich -c "ALTER EXTENSION vector UPDATE;"
       $STD sudo -u postgres psql -d immich -c "ALTER EXTENSION vchord UPDATE;"
@@ -212,7 +214,16 @@ EOF
     cd "$SRC_DIR"
     export MISE_TRUSTED_CONFIG_PATHS="$SRC_DIR"/mise.toml
     export MISE_DISABLE_TOOLS=github:jellyfin/jellyfin-ffmpeg
-    $STD mise install
+    mise_ok=0
+    for i in 1 2 3; do
+      $STD mise install && {
+        mise_ok=1
+        break
+      }
+      msg_warn "mise install failed (attempt $i/3) - retrying"
+      sleep 5
+    done
+    [[ "$mise_ok" -eq 1 ]] || exit 1
     export PATH="$(mise bin-paths 2>/dev/null | tr '\n' ':')$PATH"
     if ! command -v extism-js >/dev/null 2>&1; then
       # extism-js ships as a bare gzip-compressed single binary (.gz) that
@@ -308,6 +319,7 @@ EOF
     grep -rl /usr/src | xargs -n1 sed -i "s|\/usr/src|$INSTALL_DIR|g"
     grep -rlE "'/build'" | xargs -n1 sed -i "s|'/build'|'$APP_DIR'|g"
     sed -i "s@\"/cache\"@\"$INSTALL_DIR/cache\"@g" "$ML_DIR"/immich_ml/config.py
+    [[ ! -f "$GEO_DIR/countryInfo.txt" ]] && curl_with_retry "https://download.geonames.org/export/dump/countryInfo.txt" "countryInfo.txt"
     ln -s "${UPLOAD_DIR:-/opt/immich/upload}" "$APP_DIR"/upload
     ln -s "${UPLOAD_DIR:-/opt/immich/upload}" "$ML_DIR"/upload
     ln -s "$GEO_DIR" "$APP_DIR"
@@ -327,6 +339,27 @@ EOF
       sed -i "s|^ExecStart=.*|ExecStart=${APP_DIR}/bin/start.sh|" /etc/systemd/system/immich-web.service
       systemctl daemon-reload
     fi
+
+    # MickLesk temporary patch for HEIC thumbnail gen
+    msg_info "Patching media.repository.js"
+    MEDIA_REPO_JS="/opt/immich/app/dist/repositories/media.repository.js"
+    if [[ -f "$MEDIA_REPO_JS" ]]; then
+      python3 - <<'PY'
+from pathlib import Path
+p = Path('/opt/immich/app/dist/repositories/media.repository.js')
+s = p.read_text()
+old = "(0, sharp_1.default)(input).metadata()"
+new = "(0, sharp_1.default)(input, { unlimited: true, limitInputPixels: false }).metadata()"
+if new in s:
+    print('hotfix already there')
+elif old in s:
+    p.write_text(s.replace(old, new, 1))
+    print('hotfix applied')
+else:
+    print('pattern not found, skipped')
+PY
+    fi
+    msg_ok "Patched media.repository.js"
 
     # chown excluding upload dir contents (may be a mount with restricted permissions)
     chown immich:immich "$INSTALL_DIR"
@@ -478,6 +511,7 @@ function compile_libvips() {
     $STD git clone https://github.com/libvips/libvips.git "$SOURCE"
     cd "$SOURCE"
     $STD git reset --hard "$LIBVIPS_REVISION"
+    $STD git apply "$BASE_DIR"/server/sources/libvips-patches/0001-put-other-loaders-ahead-of-dcrawload.patch
     $STD meson setup build --buildtype=release --libdir=lib -Dintrospection=disabled -Dtiff=disabled
     cd build
     $STD ninja install
