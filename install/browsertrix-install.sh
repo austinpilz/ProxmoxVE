@@ -29,22 +29,31 @@ net.ipv4.ip_forward = 1
 net.bridge.bridge-nf-call-iptables = 1
 net.bridge.bridge-nf-call-ip6tables = 1
 EOF
-$STD sysctl -p /etc/sysctl.d/99-k3s.conf || true
+sysctl -p /etc/sysctl.d/99-k3s.conf 2>/dev/null || true
 
 # K3s kubelet needs /dev/kmsg; in LXC containers it may not exist.
 if [ ! -e /dev/kmsg ]; then
   ln -sf /dev/console /dev/kmsg
 fi
 
-# Ensure /dev/kmsg symlink survives reboots
-cat <<'EOF' >/etc/udev/rules.d/99-kmsg.rules
-KERNEL=="console", SYMLINK+="kmsg"
+# Ensure /dev/kmsg symlink survives reboots via rc.local
+if ! grep -q "kmsg" /etc/rc.local 2>/dev/null; then
+  cat <<'EOF' >/etc/rc.local
+#!/bin/sh -e
+[ -e /dev/kmsg ] || ln -sf /dev/console /dev/kmsg
+exit 0
 EOF
+  chmod +x /etc/rc.local
+fi
 msg_ok "Configured Kernel Settings"
 
 msg_info "Installing K3s (Lightweight Kubernetes)"
-export INSTALL_K3S_EXEC="server --disable=traefik --write-kubeconfig-mode=644"
-$STD curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="$INSTALL_K3S_EXEC" sh -
+curl -sfL https://get.k3s.io -o /tmp/k3s-install.sh
+export K3S_KUBECONFIG_MODE="644"
+export INSTALL_K3S_EXEC="--disable=traefik"
+$STD sh /tmp/k3s-install.sh
+rm -f /tmp/k3s-install.sh
+unset K3S_KUBECONFIG_MODE INSTALL_K3S_EXEC
 msg_ok "Installed K3s"
 
 msg_info "Waiting for K3s to be Ready"
